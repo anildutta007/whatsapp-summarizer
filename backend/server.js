@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
+import whatsappPkg from 'whatsapp-web.js';
+const { Client, LocalAuth, MessageMedia } = whatsappPkg;
 import Anthropic from '@anthropic-ai/sdk';
 import qrcode from 'qrcode-terminal';
 
