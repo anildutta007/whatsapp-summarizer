@@ -1,15 +1,7 @@
-FROM node:20-bullseye
+FROM mcr.microsoft.com/playwright:v1.40.0-jammy-amd64
 
-# Install chromium and dependencies
-RUN apt-get update && apt-get install -y \
-  chromium \
-  ca-certificates \
-  fonts-liberation \
-  libnss3 \
-  libxss1 \
-  libappindicator1 \
-  libindicator7 \
-  && rm -rf /var/lib/apt/lists/*
+# Node.js is already included in this image
+# Chromium and all dependencies are pre-installed
 
 WORKDIR /app
 
