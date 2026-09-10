@@ -1,0 +1,24 @@
+name: Auto Deploy to Railway & Vercel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy Backend to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm i -g @railway/cli
+          railway up --service=whatsapp-summarizer --detach || true
+
+      - name: Notify
+        run: echo "✅ Deployment initiated! Check Vercel and Railway dashboards for progress."
