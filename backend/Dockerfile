@@ -1,10 +1,14 @@
-FROM node:20-slim
+FROM node:20-bullseye
 
-# Install chromium dependencies
+# Install chromium and dependencies
 RUN apt-get update && apt-get install -y \
-  chromium-browser \
+  chromium \
   ca-certificates \
   fonts-liberation \
+  libnss3 \
+  libxss1 \
+  libappindicator1 \
+  libindicator7 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
