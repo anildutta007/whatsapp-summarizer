@@ -1,145 +1,108 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import whatsappPkg from 'whatsapp-web.js';
-const { Client, LocalAuth, MessageMedia } = whatsappPkg;
+import { Boom } from '@hapi/boom';
+import P from 'pino';
+import * as fs from 'fs';
+import * as path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import QRCode from 'qrcode';
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, proto } from '@whiskeysockets/baileys';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
-  credentials: true
-}));
+app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 app.use(express.json());
 
-// Initialize Claude client
-const anthropic = new Anthropic({
-  apiKey: process.env.CLAUDE_API_KEY
-});
+const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+const logger = P({ timestamp: () => `,"time":"${new Date().toJSON()}"` }).child({});
 
-// Initialize WhatsApp client
-let whatsappClient;
+let sock;
 let isReady = false;
-let qrCodeGenerated = false;
 let currentQRCode = null;
+const authDir = './auth_info_baileys';
 
-function initWhatsApp() {
-  whatsappClient = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+async function connectToWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+  sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    logger: logger,
+    browser: ['Ubuntu', 'Chrome', '120.0.0.0']
+  });
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      try {
+        currentQRCode = await QRCode.toDataURL(qr);
+        console.log('QR Code Generated - Scan with your phone');
+      } catch (err) {
+        console.error('Error generating QR code:', err);
+      }
+    }
+
+    if (connection === 'open') {
+      console.log('✅ WhatsApp connected!');
+      isReady = true;
+    }
+
+    if (connection === 'close') {
+      let shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Connection closed, reconnect:', shouldReconnect);
+      if (shouldReconnect) {
+        setTimeout(() => connectToWhatsApp(), 3000);
+      }
     }
   });
 
-  whatsappClient.on('qr', async (qr) => {
-    console.log('QR Code received, generating image...');
-    try {
-      currentQRCode = await QRCode.toDataURL(qr);
-      console.log('QR Code Image Generated - Scan with your phone');
-      qrCodeGenerated = true;
-    } catch (err) {
-      console.error('Error generating QR code:', err);
-    }
-  });
-
-  whatsappClient.on('ready', () => {
-    console.log('WhatsApp client is ready!');
-    isReady = true;
-    qrCodeGenerated = false;
-  });
-
-  whatsappClient.on('message_create', (msg) => {
-    // Log messages if needed
-    console.log('Message from', msg.from);
-  });
-
-  whatsappClient.on('disconnected', (reason) => {
-    console.log('Client disconnected:', reason);
-    isReady = false;
-  });
-
-  whatsappClient.initialize();
+  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('messages.upsert', () => {});
 }
 
-// Initialize WhatsApp on startup
-initWhatsApp();
+connectToWhatsApp();
 
 // API Routes
-
-// Health check
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    whatsappReady: isReady,
-    qrCodeGenerated
-  });
+  res.json({ status: 'ok', whatsappReady: isReady });
 });
 
-// Get WhatsApp status
 app.get('/api/status', (req, res) => {
   if (!isReady) {
     return res.status(503).json({
       ready: false,
-      message: qrCodeGenerated
-        ? 'Waiting for QR code scan. Please scan with your phone.'
-        : 'Initializing WhatsApp...'
+      message: currentQRCode ? 'Waiting for QR code scan' : 'Initializing...'
     });
   }
   res.json({ ready: true, message: 'WhatsApp connected' });
 });
 
-// Get QR Code
 app.get('/qr', (req, res) => {
   if (!currentQRCode) {
     return res.status(404).json({ error: 'No QR code available' });
   }
   res.setHeader('Content-Type', 'text/html');
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>WhatsApp QR Code</title>
-      <style>
-        body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f0f0f0; }
-        .container { text-align: center; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        img { max-width: 400px; }
-        h1 { margin: 0 0 20px 0; color: #333; }
-        p { color: #666; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>📱 Scan to Connect WhatsApp</h1>
-        <img src="${currentQRCode}" alt="QR Code">
-        <p>Scan this code with your WhatsApp phone</p>
-        <p>Settings → Linked Devices</p>
-      </div>
-    </body>
-    </html>
-  `);
+  res.send(`<!DOCTYPE html><html><head><title>WhatsApp QR</title><style>body{display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f0f0f0}.container{text-align:center;background:white;padding:30px;border-radius:10px}img{max-width:400px}</style></head><body><div class="container"><h1>📱 Scan QR Code</h1><img src="${currentQRCode}" alt="QR"><p>Scan with WhatsApp Settings → Linked Devices</p></div></body></html>`);
 });
 
-// Get all groups
 app.get('/api/groups', async (req, res) => {
   try {
-    if (!isReady) {
+    if (!isReady || !sock) {
       return res.status(503).json({ error: 'WhatsApp not ready' });
     }
 
-    const chats = await whatsappClient.getChats();
+    const chats = await sock.fetchAllSingleChats();
     const groups = chats
-      .filter(chat => chat.isGroup)
+      .filter(chat => chat.id.endsWith('@g.us'))
       .map(chat => ({
-        id: chat.id._serialized,
-        name: chat.name,
-        participantCount: chat.participants.length
+        id: chat.id,
+        name: chat.name || chat.subject || 'Unknown',
+        participants: chat.participants?.length || 0
       }));
 
     res.json(groups);
@@ -149,135 +112,100 @@ app.get('/api/groups', async (req, res) => {
   }
 });
 
-// Summarize messages from a group
 app.post('/api/summarize', async (req, res) => {
   try {
-    if (!isReady) {
+    if (!isReady || !sock) {
       return res.status(503).json({ error: 'WhatsApp not ready' });
     }
 
     const { groupId, hours = 24 } = req.body;
-
     if (!groupId) {
-      return res.status(400).json({ error: 'groupId is required' });
+      return res.status(400).json({ error: 'groupId required' });
     }
 
-    // Get the chat
-    const chat = await whatsappClient.getChatById(groupId);
-
-    if (!chat) {
-      return res.status(404).json({ error: 'Group not found' });
-    }
-
-    // Calculate time threshold
     const now = Date.now();
     const timeThreshold = now - (hours * 60 * 60 * 1000);
 
-    // Fetch messages from the chat
-    const messages = await chat.fetchMessages({ limit: 1000 });
+    const messages = [];
+    let cursor = 0;
 
-    // Filter messages by time period
-    const filteredMessages = messages.filter(msg => {
-      const msgTime = msg.timestamp * 1000; // WhatsApp uses seconds, convert to ms
-      return msgTime >= timeThreshold;
-    });
-
-    if (filteredMessages.length === 0) {
-      return res.json({
-        group: chat.name,
-        period: `${hours} hours`,
-        messageCount: 0,
-        summary: 'No messages found in the specified time period.'
-      });
+    try {
+      const result = await sock.loadConversation(groupId, 100);
+      for (const msg of result) {
+        if (msg.messageTimestamp * 1000 >= timeThreshold) {
+          const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '[Media]';
+          const sender = msg.key.fromMe ? 'You' : msg.pushName || 'Unknown';
+          messages.push({ sender, text, time: new Date(msg.messageTimestamp * 1000).toISOString() });
+        }
+      }
+    } catch (e) {
+      console.log('Load conversation error:', e);
     }
 
-    // Format messages for Claude
-    const formattedMessages = filteredMessages
-      .map(msg => {
-        const author = msg.author || 'Unknown';
-        const body = msg.body || '[Media]';
-        const time = new Date(msg.timestamp * 1000).toLocaleString();
-        return `${time} - ${author}: ${body}`;
-      })
-      .join('\n');
+    if (messages.length === 0) {
+      return res.json({ group: groupId, period: `${hours}h`, messageCount: 0, summary: 'No messages found' });
+    }
 
-    // Send to Claude for summarization
+    const formattedMessages = messages.map(m => `${m.time} - ${m.sender}: ${m.text}`).join('\n');
+
     const response = await anthropic.messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 1024,
-      messages: [
-        {
-          role: 'user',
-          content: `Please summarize the following WhatsApp group chat messages from the last ${hours} hours. Focus on key topics, decisions, and important information. Format the summary with bullet points for clarity.\n\n${formattedMessages}`
-        }
-      ]
+      messages: [{
+        role: 'user',
+        content: `Summarize these WhatsApp messages from the last ${hours} hours:\n\n${formattedMessages}`
+      }]
     });
-
-    const summary = response.content[0].text;
 
     res.json({
-      group: chat.name,
-      period: `${hours} hours`,
-      messageCount: filteredMessages.length,
-      summary,
+      group: groupId,
+      period: `${hours}h`,
+      messageCount: messages.length,
+      summary: response.content[0].text,
       timestamp: new Date().toISOString()
     });
-
   } catch (error) {
-    console.error('Error summarizing messages:', error);
+    console.error('Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get messages (for debugging)
 app.post('/api/messages', async (req, res) => {
   try {
-    if (!isReady) {
+    if (!isReady || !sock) {
       return res.status(503).json({ error: 'WhatsApp not ready' });
     }
 
     const { groupId, hours = 24 } = req.body;
-
     if (!groupId) {
-      return res.status(400).json({ error: 'groupId is required' });
-    }
-
-    const chat = await whatsappClient.getChatById(groupId);
-
-    if (!chat) {
-      return res.status(404).json({ error: 'Group not found' });
+      return res.status(400).json({ error: 'groupId required' });
     }
 
     const now = Date.now();
     const timeThreshold = now - (hours * 60 * 60 * 1000);
+    const messages = [];
 
-    const messages = await chat.fetchMessages({ limit: 1000 });
+    try {
+      const result = await sock.loadConversation(groupId, 100);
+      for (const msg of result) {
+        if (msg.messageTimestamp * 1000 >= timeThreshold) {
+          messages.push({
+            sender: msg.key.fromMe ? 'You' : msg.pushName || 'Unknown',
+            text: msg.message?.conversation || '[Media]',
+            timestamp: new Date(msg.messageTimestamp * 1000).toISOString()
+          });
+        }
+      }
+    } catch (e) {
+      console.log('Error:', e);
+    }
 
-    const filteredMessages = messages
-      .filter(msg => {
-        const msgTime = msg.timestamp * 1000;
-        return msgTime >= timeThreshold;
-      })
-      .map(msg => ({
-        author: msg.author || 'Unknown',
-        body: msg.body || '[Media]',
-        timestamp: new Date(msg.timestamp * 1000).toISOString()
-      }));
-
-    res.json({
-      group: chat.name,
-      period: `${hours} hours`,
-      messageCount: filteredMessages.length,
-      messages: filteredMessages
-    });
-
+    res.json({ group: groupId, period: `${hours}h`, messageCount: messages.length, messages });
   } catch (error) {
-    console.error('Error fetching messages:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
