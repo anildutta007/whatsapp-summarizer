@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import whatsappPkg from 'whatsapp-web.js';
 const { Client, LocalAuth, MessageMedia } = whatsappPkg;
 import Anthropic from '@anthropic-ai/sdk';
-import qrcode from 'qrcode-terminal';
+import QRCode from 'qrcode';
 
 dotenv.config();
 
@@ -27,6 +27,7 @@ const anthropic = new Anthropic({
 let whatsappClient;
 let isReady = false;
 let qrCodeGenerated = false;
+let currentQRCode = null;
 
 function initWhatsApp() {
   whatsappClient = new Client({
@@ -37,10 +38,15 @@ function initWhatsApp() {
     }
   });
 
-  whatsappClient.on('qr', (qr) => {
-    console.log('QR Code received, scan with your phone:');
-    qrcode.generate(qr, { small: true });
-    qrCodeGenerated = true;
+  whatsappClient.on('qr', async (qr) => {
+    console.log('QR Code received, generating image...');
+    try {
+      currentQRCode = await QRCode.toDataURL(qr);
+      console.log('QR Code Image Generated - Scan with your phone');
+      qrCodeGenerated = true;
+    } catch (err) {
+      console.error('Error generating QR code:', err);
+    }
   });
 
   whatsappClient.on('ready', () => {
@@ -87,6 +93,37 @@ app.get('/api/status', (req, res) => {
     });
   }
   res.json({ ready: true, message: 'WhatsApp connected' });
+});
+
+// Get QR Code
+app.get('/qr', (req, res) => {
+  if (!currentQRCode) {
+    return res.status(404).json({ error: 'No QR code available' });
+  }
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>WhatsApp QR Code</title>
+      <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f0f0f0; }
+        .container { text-align: center; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        img { max-width: 400px; }
+        h1 { margin: 0 0 20px 0; color: #333; }
+        p { color: #666; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>📱 Scan to Connect WhatsApp</h1>
+        <img src="${currentQRCode}" alt="QR Code">
+        <p>Scan this code with your WhatsApp phone</p>
+        <p>Settings → Linked Devices</p>
+      </div>
+    </body>
+    </html>
+  `);
 });
 
 // Get all groups
